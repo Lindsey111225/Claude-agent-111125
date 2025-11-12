@@ -1473,3 +1473,151 @@ def render_wordgraph_tab(T: dict):
         }}
         
         .stTextInput
+# ... (All previous code as above unchanged and assumed included)
+
+from fpdf import FPDF   # For markdown->PDF export
+import streamlit.components.v1 as components
+
+def markdown_to_pdf(markdown_text: str, highlight_kw: List[str], color: str) -> bytes:
+    """Convert markdown text to simple PDF, preserving highlighted keywords"""
+    class PDF(FPDF):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.add_page()
+            self.set_auto_page_break(auto=True, margin=10)
+            self.set_font("Arial", size=12)
+        
+        def add_md(self, md_text, kws, color_hex):
+            import html  # For simple HTML entity decode
+            for line in md_text.splitlines():
+                if not line.strip():
+                    self.ln(7)
+                    continue
+                # Remove HTML tags, highlight kw in color
+                line = html.unescape(re.sub(r"<.*?>", "", line))
+                for kw in sorted(set(kws), key=len, reverse=True):
+                    if kw:
+                        line = re.sub(
+                            rf"\b({re.escape(kw)})\b",
+                            lambda m: f"[{color_hex}] " + m.group(0) + " [RESETCOLOR]",
+                            line,
+                            flags=re.IGNORECASE
+                        )
+                # Replace color tags with FPDF logic
+                cursor = 0
+                while cursor < len(line):
+                    color_start = line.find(f"[{color_hex}]", cursor)
+                    if color_start < 0:
+                        self.cell(0, 7, txt=line[cursor:], ln=1)
+                        break
+                    if color_start > cursor:
+                        self.cell(0, 7, txt=line[cursor:color_start], ln=0)
+                    cursor = color_start + len(color_hex) + 2
+                    color_end = line.find("[RESETCOLOR]", cursor)
+                    if color_end < 0:
+                        color_text = line[cursor:]
+                        cursor = len(line)
+                    else:
+                        color_text = line[cursor:color_end]
+                        cursor = color_end + len("[RESETCOLOR]")
+                    # Set text color
+                    r, g, b = tuple(int(color_hex.lstrip("#")[i:i+2], 16) for i in (0, 2, 4))
+                    self.set_text_color(r, g, b)
+                    self.cell(0, 7, txt=color_text, ln=0)
+                    self.set_text_color(0, 0, 0)
+                self.ln(7)
+    
+    pdf = PDF()
+    pdf.add_md(markdown_text, highlight_kw, color)
+    output = io.BytesIO()
+    pdf.output(output)
+    return output.getvalue()
+
+
+def render_combine_tab(T: dict):
+    st.subheader(T["combine"])
+    combined_parts = []
+    for doc in st.session_state.docs:
+        if doc["type"] == "pdf":
+            ocr_texts = []
+            if doc.get("images"):
+                for page_data in doc["images"]:
+                    key = (doc["id"], page_data["page"])
+                    if key in st.session_state.ocr_results:
+                        ocr_texts.append(f"### {T['page']} {page_data['page']}\n\n{st.session_state.ocr_results[key]}")
+            if ocr_texts:
+                combined_parts.append(f"## {doc['name']}\n\n" + "\n\n".join(ocr_texts))
+        else:
+            if doc["content"]:
+                combined_parts.append(f"## {doc['name']}\n\n{doc['content']}")
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        if st.button(T["auto_extract"], use_container_width=True):
+            full_text = "\n\n".join(combined_parts)
+            lang = "zh" if st.session_state.settings["lang"] == "zh-TW" else "en"
+            keywords = extract_keywords_yake(full_text, max_k=30, language=lang)
+            st.session_state.keywords = keywords
+            render_status("success", f"Extracted {len(keywords)} keywords")
+    with col2:
+        if st.button(T["generate_combined"], type="primary", use_container_width=True):
+            combined_text = "\n\n---\n\n".join(combined_parts)
+            if st.session_state.keywords:
+                theme_color = st.session_state.settings.get("highlight_color") or FLOWER_THEMES[st.session_state.settings["theme_idx"]][1]
+                combined_text = highlight_keywords(combined_text, st.session_state.keywords, theme_color)
+            st.session_state.combined_doc = combined_text
+            st.session_state.metrics["total_tokens"] = estimate_tokens(combined_text)
+            st.balloons()
+            render_status("success", "Combined document generated")
+    # Show/edit keywords
+    if st.session_state.keywords or st.session_state.combined_doc:
+        kwcol1, kwcol2 = st.columns([2, 1])
+        with kwcol1:
+            keywords_text = st.text_area(
+                "Edit keywords (one per line)",
+                value="\n".join(st.session_state.keywords), height=100
+            )
+            st.session_state.keywords = [k.strip() for k in keywords_text.split("\n") if k.strip()]
+        with kwcol2:
+            theme_color = st.color_picker(
+                "Keyword highlight color",
+                value=st.session_state.settings.get("highlight_color")
+                       or FLOWER_THEMES[st.session_state.settings["theme_idx"]][1]
+            )
+            st.session_state.settings["highlight_color"] = theme_color
+    # Tags
+    if st.session_state.keywords:
+        tags_html = "".join([f"<span class='tag'>{kw}</span>" for kw in st.session_state.keywords[:20]])
+        st.markdown(tags_html, unsafe_allow_html=True)
+    # Show doc
+    if st.session_state.combined_doc:
+        st.markdown("---")
+        st.markdown("### " + T["combined_doc"])
+        st.markdown("<div class='card'>", unsafe_allow_html=True)
+        st.markdown(st.session_state.combined_doc, unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+        # Export
+        col1, col2 = st.columns(2)
+        with col1:
+            st.download_button(
+                "📥 Download Markdown",
+                data=st.session_state.combined_doc,
+                file_name=f"combined_document_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
+                mime="text/markdown"
+            )
+        with col2:
+            if st.button("📤 Download PDF"):
+                pdf_bytes = markdown_to_pdf(
+                    st.session_state.combined_doc,
+                    st.session_state.keywords,
+                    st.session_state.settings["highlight_color"]
+                )
+                b64 = base64.b64encode(pdf_bytes).decode("utf-8")
+                href = f'<a href="data:application/pdf;base64,{b64}" download="combined_highlighted_{datetime.now().strftime("%Y%m%d_%H%M%S")}.pdf">Download PDF</a>'
+                st.markdown(href, unsafe_allow_html=True)
+
+# Replace the old render_combine_tab(T) implementation in your main() with this one.
+
+# ==============================
+
+if __name__ == "__main__":
+    main()
