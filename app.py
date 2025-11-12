@@ -1156,7 +1156,7 @@ def render_ocr_tab(T: dict):
                                 "gemini:gemini-2.5-flash",
                                 "gemini:gemini-2.5-flash-lite",
                                 "openai:gpt-4o-mini",
-                                "openai:gpt-4-turbo"
+                                "openai:gpt-4.1-mini"
                             ],
                             key=f"llm_model_{doc['id']}"
                         )
